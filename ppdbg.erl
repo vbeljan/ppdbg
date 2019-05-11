@@ -19,10 +19,10 @@
 
 -define(SERVER, ?MODULE).
 
--record(state, {}).
+-record(state, {logpath}).
 
 -record(process, {pid,
-                  param}).
+                  name}).
 
 -record(checkevent, {eventid,
                      checkpointname,
@@ -42,13 +42,13 @@ start(Opts) ->
         {error, Reason} ->
             dbg("Couldn't start ppdbg, reason: ~p", [Reason])
     end.
-    
 
 tag(Param) ->
-    
+    call(tag, Param),
     ok.
 
 checkpoint(ChckptName) ->
+    call(chk, ChckptName),
     ok.
 
 %%--------------------------------------------------------------------
@@ -61,7 +61,7 @@ checkpoint(ChckptName) ->
                           {error, Error :: term()} |
                           ignore.
 start_link(Opts) ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [], [Opts]).
+    gen_server:start_link({local, ?SERVER}, ?MODULE, Opts, []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -78,9 +78,12 @@ start_link(Opts) ->
                               {ok, State :: term(), hibernate} |
                               {stop, Reason :: term()} |
                               ignore.
-init([]) ->
+init(Opts) ->
     process_flag(trap_exit, true),
-    {ok, #state{}}.
+    Logpath = pl_get_value(Opts, logpath),
+    {ok, #state{
+            logpath = Logpath
+           }}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -97,6 +100,16 @@ init([]) ->
                          {noreply, NewState :: term(), hibernate} |
                          {stop, Reason :: term(), Reply :: term(), NewState :: term()} |
                          {stop, Reason :: term(), NewState :: term()}.
+handle_call({tag, Params}, From, State) ->
+    Name = case pl_get_value(Params, name) of
+               false -> pid_to_list(From);
+               N -> N end,
+
+    Proc = #process{pid = From,
+                 name = Name},
+    NState = tag_process(State, Proc),
+    {reply,
+
 handle_call(_Request, _From, State) ->
     Reply = ok,
     {reply, Reply, State}.
@@ -173,10 +186,27 @@ format_status(_Opt, Status) ->
 %%% Internal functions
 %%%===================================================================
 
+pl_get_value(PropList, Key) ->
+    case lists:keyfind(Key, 1, PropList) of
+        {_, Res} ->
+            Res;
+        _ ->
+            false
+    end.
+
+call(Action, What) ->
+    gen_server:call(self(), {Action, What}).
+
 dbg(Msg)->
     io:format("PPDBG: " ++ Msg).
 dbg(Msg, Args) ->
     io:format(Msg, Args).
 
-%% tag(Param, Pid) ->
+tag_process(Params) ->
+    Args = []
+    dets:open_file(
+
+
+
+    
     
