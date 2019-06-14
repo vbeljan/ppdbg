@@ -18,16 +18,18 @@
 -export([start/1,tag/1,checkpoint/1]).
 
 -define(SERVER, ?MODULE).
+-define(CHK_EVENT, ppdbg_event).
+-define(PROC_TAG, ppdbg_proc_tag).
+
 
 -record(state, {logpath}).
 
 -record(process, {pid,
                   name}).
 
--record(checkevent, {eventid,
+-record(checkpoint, {timestamp,
                      checkpointname,
-                     timestamp,
-                     procstate}).
+                     pid}).
                      
 
 %%%===================================================================
@@ -43,9 +45,14 @@ start(Opts) ->
             dbg("Couldn't start ppdbg, reason: ~p", [Reason])
     end.
 
-tag(Param) ->
-    call(tag, Param),
-    ok.
+tag(Tag) when is_list(Tag) ->
+    call(tag, #process{pid = self(),
+                       name = Tag}),
+    ok;
+tag(_) ->
+    dbg("Cannot tag process, please only use a string as a process tag."),
+    nok.
+
 
 checkpoint(ChckptName) ->
     call(chk, ChckptName),
@@ -81,9 +88,19 @@ start_link(Opts) ->
 init(Opts) ->
     process_flag(trap_exit, true),
     Logpath = pl_get_value(Opts, logpath),
-    {ok, #state{
-            logpath = Logpath
-           }}.
+    DetsArgs = [{file, Logpath},
+            {access, read_write},
+            {type, set}],
+
+    try {dets:open_file(?PROC_TAG, DetsArgs),
+         dets:open_file(?CHK_EVENT, DetsArgs)} of
+        {{ok,_},{ok,_}} ->
+            {ok, #state{
+                    logpath = Logpath
+                   }}
+    catch Errors ->
+            dbg("DETS tables init failed: ~p", [Errors])
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -202,11 +219,21 @@ dbg(Msg)->
 dbg(Msg, Args) ->
     io:format(Msg, Args).
 
-tag_process(Params) ->
-    Args = []
-    dets:open_file(
+tag_process(State, Params) ->
+    Args = [],
+    dets:
+            
+pass_checkpoint(ChkName) ->
+    case dets:open_file(?DETS_TABLE, 
+                        {file, State#state.logpath},
+                        {access, read_write},
+                        {type, set}) of
+        {ok, ?DETS_TABLE} ->
+            write_pass_checkpoint(ChkName);
+        Error ->
+            dbg("Failed to open dets table, error: ~p", [Error])
+    end.
 
-
-
-    
+write_pass_checkpoint(ChkName) ->
+    Time = erlang:timestamp(),
     
