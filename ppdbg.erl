@@ -60,7 +60,8 @@ checkpoint(ChckptName) when is_list(ChckptName) ->
     Checkpoint = #checkpoint{timestamp = take_timestamp(),
                              checkpointname = ChckptName,
                              pid = self()},
-    cast(chk, Checkpoint),
+    dbg("Triggered checkpoint ~p", [ChckptName]),
+    cast(checkpoint, Checkpoint),
     ok;
 
 checkpoint(_) ->
@@ -99,8 +100,8 @@ init(Opts) ->
     process_flag(trap_exit, true),
     Logpath = pl_get_value(Opts, logpath),
 
-    case {init_table(Logpath, ?PROC_TAG), init_table(Logpath, ?CHK_EVENT)} of
-        {{ok, _},{ok, _}} ->
+    case {init_table(memory, ?PROC_TAG), init_table(Logpath, ?CHK_EVENT)} of
+        {_Ref,{ok, _}} ->
             {ok, #state{logpath = Logpath}};
 
     Errors ->
@@ -218,11 +219,18 @@ format_status(_Opt, Status) ->
 %%% Internal functions
 %%%===================================================================
 
+init_table(memory, Name) ->
+    EtsArgs = [set, 
+               named_table, 
+               protected],
+    
+    catch ets:new(Name, EtsArgs);
+
 init_table(Logpath, Name) ->
     Namepath = filename:join(Logpath, Name),
     DetsArgs = [{file, Namepath},
             {access, read_write},
-            {type, set}],
+            {type, bag}],
 
     catch dets:open_file(Name, DetsArgs).
 
@@ -245,8 +253,8 @@ dbg(Msg, Args) ->
     io:format("PPDBG: " ++ Msg ++ "~n", Args).
 
 tag_process(Proc) ->
-    case dets:insert_new(?PROC_TAG, {Proc#process.pid,
-                                     Proc#process.name}) of
+    case ets:insert_new(?PROC_TAG, {Proc#process.pid,
+                                    Proc#process.name}) of
         true ->
             ok;
         false ->
@@ -257,12 +265,28 @@ tag_process(Proc) ->
     ok.
 
 pass_checkpoint(Chk) ->
-    case dets:insert(?CHK_EVENT, Chk) of
-        ok ->
+    case ets:lookup(?PROC_TAG, Chk#checkpoint.pid) of
+        [] ->
+            %% The process triggering the checkpoint was not tagged, do nothing
             ok;
+        [{_Pid, ProcName}] ->
+            do_pass_checkpoint(ProcName, 
+                               Chk#checkpoint.timestamp, 
+                               Chk#checkpoint.checkpointname);
         Error ->
-            dbg("Error while registering checkpoint: ~p", [Error])
+            dbg("Error looking up process: ~p", [Error])
+    end.
+
+do_pass_checkpoint(ProcName, ChkName, Time) ->
+    try dets:insert(?CHK_EVENT, {ProcName, ChkName, Time}) of
+        ok ->
+            ok
+    catch Error ->
+            dbg("Error while registering checkpoint: ~p", [Error]),
+            stop()
     end.
 
 take_timestamp() ->
-    erlang:localtime().
+    {_, {H,M,S}} = erlang:localtime(),
+    list_to_binary(io_lib:format("~p:~p:~p" , [H,M,S])).
+    
