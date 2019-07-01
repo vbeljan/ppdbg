@@ -15,7 +15,7 @@
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3, format_status/2]).
--export([start/1,tag/1,checkpoint/1]).
+-export([start/1, stop/0, tag/1,checkpoint/1]).
 
 -define(SERVER, ?MODULE).
 -define(CHK_EVENT, ppdbg_event).
@@ -30,7 +30,7 @@
 -record(checkpoint, {timestamp,
                      checkpointname,
                      pid}).
-                     
+
 
 %%%===================================================================
 %%% API
@@ -38,25 +38,35 @@
 
 
 start(Opts) ->
-    case ppdbg_server:start_link(Opts) of 
-        {ok, _Pid} ->
-            dbg("Started ppdbg");
+   case ppdbg:start_link(Opts) of
+        {ok, Pid} ->
+            dbg("Started ppdbg, pid ~p", [Pid]);
         {error, Reason} ->
             dbg("Couldn't start ppdbg, reason: ~p", [Reason])
     end.
 
+stop() ->
+    cast(stop, ok).
+
 tag(Tag) when is_list(Tag) ->
-    call(tag, #process{pid = self(),
-                       name = Tag}),
+    call(tag, Tag),
     ok;
 tag(_) ->
     dbg("Cannot tag process, please only use a string as a process tag."),
     nok.
 
 
-checkpoint(ChckptName) ->
-    call(chk, ChckptName),
-    ok.
+checkpoint(ChckptName) when is_list(ChckptName) ->
+    Checkpoint = #checkpoint{timestamp = take_timestamp(),
+                             checkpointname = ChckptName,
+                             pid = self()},
+    cast(chk, Checkpoint),
+    ok;
+
+checkpoint(_) ->
+    dbg("Invalid checkpoint name, please use strings."),
+    nok.
+
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -88,18 +98,15 @@ start_link(Opts) ->
 init(Opts) ->
     process_flag(trap_exit, true),
     Logpath = pl_get_value(Opts, logpath),
-    DetsArgs = [{file, Logpath},
-            {access, read_write},
-            {type, set}],
 
-    try {dets:open_file(?PROC_TAG, DetsArgs),
-         dets:open_file(?CHK_EVENT, DetsArgs)} of
-        {{ok,_},{ok,_}} ->
-            {ok, #state{
-                    logpath = Logpath
-                   }}
-    catch Errors ->
-            dbg("DETS tables init failed: ~p", [Errors])
+    case {init_table(Logpath, ?PROC_TAG), init_table(Logpath, ?CHK_EVENT)} of
+        {{ok, _},{ok, _}} ->
+            {ok, #state{logpath = Logpath}};
+
+    Errors ->
+            dbg("DETS tables init failed: ~p", [Errors]),
+            stop(),
+            {ok,#state{}}
     end.
 
 %%--------------------------------------------------------------------
@@ -117,15 +124,11 @@ init(Opts) ->
                          {noreply, NewState :: term(), hibernate} |
                          {stop, Reason :: term(), Reply :: term(), NewState :: term()} |
                          {stop, Reason :: term(), NewState :: term()}.
-handle_call({tag, Params}, From, State) ->
-    Name = case pl_get_value(Params, name) of
-               false -> pid_to_list(From);
-               N -> N end,
-
-    Proc = #process{pid = From,
-                 name = Name},
-    NState = tag_process(State, Proc),
-    {reply,
+handle_call({tag, ProcTag}, {Pid, _Ref}, State) ->
+    Proc = #process{pid=Pid,
+                    name=ProcTag},
+    tag_process(Proc),
+    {reply, ok, State};
 
 handle_call(_Request, _From, State) ->
     Reply = ok,
@@ -142,6 +145,15 @@ handle_call(_Request, _From, State) ->
                          {noreply, NewState :: term(), Timeout :: timeout()} |
                          {noreply, NewState :: term(), hibernate} |
                          {stop, Reason :: term(), NewState :: term()}.
+
+handle_cast({checkpoint, Chk}, State) ->
+    pass_checkpoint(Chk),
+    {noreply, State};
+
+handle_cast({stop, _Reason}, State) ->
+    dbg("Stopping PPDBG now..."),
+    {stop, shutdown, State};
+
 handle_cast(_Request, State) ->
     {noreply, State}.
 
@@ -171,6 +183,9 @@ handle_info(_Info, State) ->
 -spec terminate(Reason :: normal | shutdown | {shutdown, term()} | term(),
                 State :: term()) -> any().
 terminate(_Reason, _State) ->
+    dbg("Terminating PPDBG"),
+    dets:close(?CHK_EVENT),
+    dets:close(?PROC_TAG),
     ok.
 
 %%--------------------------------------------------------------------
@@ -203,6 +218,14 @@ format_status(_Opt, Status) ->
 %%% Internal functions
 %%%===================================================================
 
+init_table(Logpath, Name) ->
+    Namepath = filename:join(Logpath, Name),
+    DetsArgs = [{file, Namepath},
+            {access, read_write},
+            {type, set}],
+
+    catch dets:open_file(Name, DetsArgs).
+
 pl_get_value(PropList, Key) ->
     case lists:keyfind(Key, 1, PropList) of
         {_, Res} ->
@@ -212,28 +235,34 @@ pl_get_value(PropList, Key) ->
     end.
 
 call(Action, What) ->
-    gen_server:call(self(), {Action, What}).
+    gen_server:call(?SERVER, {Action, What}).
+cast(Action, What) ->
+    gen_server:cast(?SERVER, {Action, What}).
 
 dbg(Msg)->
-    io:format("PPDBG: " ++ Msg).
+    io:format("PPDBG: " ++ Msg ++ "~n").
 dbg(Msg, Args) ->
-    io:format(Msg, Args).
+    io:format("PPDBG: " ++ Msg ++ "~n", Args).
 
-tag_process(State, Params) ->
-    Args = [],
-    dets:
-            
-pass_checkpoint(ChkName) ->
-    case dets:open_file(?DETS_TABLE, 
-                        {file, State#state.logpath},
-                        {access, read_write},
-                        {type, set}) of
-        {ok, ?DETS_TABLE} ->
-            write_pass_checkpoint(ChkName);
+tag_process(Proc) ->
+    case dets:insert_new(?PROC_TAG, {Proc#process.pid,
+                                     Proc#process.name}) of
+        true ->
+            ok;
+        false ->
+            dbg("This process already tagged, doing nothing: ~p", [Proc]);
         Error ->
-            dbg("Failed to open dets table, error: ~p", [Error])
+            dbg("Error while tagging process: ~p", [Error])
+    end,
+    ok.
+
+pass_checkpoint(Chk) ->
+    case dets:insert(?CHK_EVENT, Chk) of
+        ok ->
+            ok;
+        Error ->
+            dbg("Error while registering checkpoint: ~p", [Error])
     end.
 
-write_pass_checkpoint(ChkName) ->
-    Time = erlang:timestamp(),
-    
+take_timestamp() ->
+    erlang:localtime().
