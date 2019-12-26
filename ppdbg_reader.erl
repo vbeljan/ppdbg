@@ -15,7 +15,7 @@
 
 -record(params,{
                 sortby = proc,
-                select = proc,
+                select = 1,
                 from = undefined,
                 to = undefined,
                 invert = false}).
@@ -29,7 +29,7 @@ main([Path|Rest]) ->
             {ok,EventTable} = dets:open_file(filename:join([Path,?CHK_EVENT])),
             Selection = selection(EventTable, Args),
             io:format("SELECTION: ~p~n", [Selection]),
-            R = dets:foldl(fun(Entry, Acc) -> arrange(Entry, Args#params.sortby, Acc) end, [], Selection),
+            R = lists:foldl(fun(Entry, Acc) -> arrange(Entry, Args#params.sortby, Acc) end, [], Selection),
             io:format("Report for ~p: ~n~p", [Path, R])
     end;
 
@@ -54,7 +54,7 @@ parseargs(P, [H|T]) ->
 match(?SORTBY,P,Value) ->
     {P#params{sortby=list_to_atom(Value)}, ok};
 match(?SELECT,P,Value) ->
-    {P#params{select=list_to_atom(Value)}, ok};
+    {P#params{select=selection_to_column_no(Value)}, ok};
 match(?FROM,P,Value) ->
     {P#params{from=Value}, ok};
 match(?TO,P,Value) ->
@@ -72,7 +72,7 @@ selection(List, Params) ->
               Params#params.invert).
 
 selection(List, _Col, undefined, undefined, _Invert) ->
-    List;
+    dets:foldl(fun(Input, Res) -> Res ++ [Input] end, [], List);
 
 selection(List, Column, From, To, Invert) ->
     dets:foldl(fun(Input, Res) -> Res ++ select(Input, Column, From, To, Invert) end, [], List).
@@ -93,12 +93,12 @@ select(Input, Column, undefined, To, _Invert) ->
             []
     end;
 
-select(Input, Column, From, To, false) when element(Column,Input) < To,
-                                            element (Column, Input) > From->
+select(Input, Column, From, To, false) when (element(Column,Input) =< To) and
+                                            (element (Column, Input) >= From)->
     [Input];
 
-select(Input, Column, From, To, true) when element(Column,Input) > To,
-                                            element (Column, Input) < From->
+select(Input, Column, From, To, true) when (element(Column,Input) >= To) and
+                                           (element (Column, Input) =< From)->
     [Input];
 
 select(_,_,_,_,_) ->
@@ -114,3 +114,10 @@ arrange({Proc, Time, Checkpoint}, checkpoint, Acc) -> orddict:append(Checkpoint,
 announce_bad_syntax() ->
     io:format("Bad syntax in arguments~n"),
     error.
+
+selection_to_column_no("proc")->
+    1;
+selection_to_column_no("time") ->
+    2;
+selection_to_column_no("checkpoint") ->
+    3.
