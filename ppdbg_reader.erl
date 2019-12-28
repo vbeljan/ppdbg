@@ -1,6 +1,8 @@
 %% #!/usr/bin/env escript
 
 -module(ppdbg_reader).
+-define(REPORT_FILE, "report.csv").
+
 -define(CHK_EVENT, "ppdbg_event").
 -define(PROC, 1).
 -define(TIME, 2).
@@ -25,17 +27,15 @@ main([Path|Rest]) ->
         error ->
             error;
         Args ->
-            io:format("PARSED ARGS: ~p", [Args]),
             {ok,EventTable} = dets:open_file(filename:join([Path,?CHK_EVENT])),
             Selection = selection(EventTable, Args),
-            io:format("SELECTION: ~p~n", [Selection]),
             R = lists:foldl(fun(Entry, Acc) -> arrange(Entry, Args#params.sortby, Acc) end, [], Selection),
-            io:format("Report for ~p: ~n~p", [Path, R])
+            assemble_report(Path, R)
     end;
 
 main(_) ->
     announce_bad_syntax(),
-    io:format("Example: escript ppdbg_reader /home/ppdbg/logs SORTBY proc").
+    io:format("Example: escript ppdbg_reader.beam /home/ppdbg/logs SORTBY proc").
 
 parseargs(Arglist) ->
     parseargs(#params{}, Arglist).
@@ -110,10 +110,40 @@ arrange({Proc, Time, Checkpoint}, proc, Acc) -> orddict:append(Proc,{Time, Check
 arrange({Proc, Time, Checkpoint}, time, Acc) -> orddict:append(Time,{Proc, Checkpoint}, Acc);
 arrange({Proc, Time, Checkpoint}, checkpoint, Acc) -> orddict:append(Checkpoint,{Proc, Time}, Acc).
 
+assemble_report(Path, List) ->
+    {ok,RF} = file:open(filename:join(Path, ?REPORT_FILE), write),
+    do_assemble_report(RF, List),
+    file:close(RF).
+
+do_assemble_report(_File, []) ->
+    ok;
+
+do_assemble_report(File, [{Key,Value}|T]) ->
+    lists:foreach(fun(Elem)-> write_entry(Key, Elem, File) end, Value),
+    do_assemble_report(File, T).
+
+write_entry(Key, {Val1,Val2}, File) ->
+    C = list_to_binary(stringify(Key, Val1, Val2)),
+    file:write(File, C);
+
+write_entry(Key, Value, _File) ->
+    io:format("Bad match in write_entry for key ~p, value ~p is not a tuple~n", [Key, Value]).
 
 announce_bad_syntax() ->
     io:format("Bad syntax in arguments~n"),
     error.
+
+stringify(K, V1, V2) ->
+    string:join([stringify(K), stringify(V1), stringify(V2), "\n"], ",").
+
+stringify(What) when is_binary(What) ->
+    binary_to_list(What);
+stringify(What) when is_list(What) ->
+    What;
+stringify(What) ->
+    io:format("Warning, parameter ~p is neither binary (time) or list~n", [What]),
+    What.
+
 
 selection_to_column_no("proc")->
     1;
